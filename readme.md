@@ -61,7 +61,7 @@ Show only PRs with at least 2 approvals:
 ./viewPr.sh --only-ready --format html --output pr-report.html
 ```
 
-Show PRs that do not have 2 approvals and that you have not reviewed yet:
+Show PRs that do not have 2 approvals and where you have not approved or requested changes yet. Plain comments do not hide PRs from this list:
 
 ```bash
 ./viewPr.sh --needs-my-review --format html --output my-review-prs.html

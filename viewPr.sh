@@ -86,7 +86,6 @@ DEFAULT_REPOS = [
     "git@github.com:Preskok/zf-hal.git",
     "git@github.com:Preskok/zf-content-negotiation.git",
     "git@github.com:Preskok/zf-oauth2.git",
-    "git@github.com:Preskok/b2bcario-client.git",
     "git@github.com:Preskok/equipment.git",
     "git@github.com:Preskok/document-viewer.git",
     "git@github.com:Preskok/workflow.git",
@@ -264,7 +263,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--needs-my-review",
         action="store_true",
-        help="Only show PRs below min approvals where the reviewer has not reviewed yet.",
+        help="Only show PRs below min approvals where the reviewer has not approved or requested changes yet.",
     )
     parser.add_argument(
         "--reviewer",
@@ -813,7 +812,8 @@ def get_authenticated_login(client: GitHubClient) -> str:
 
 def has_reviewer_reviewed(pull: PullRequest, reviewer: str) -> bool:
     reviewer_lower = reviewer.lower()
-    return any(reviewed_by.lower() == reviewer_lower for reviewed_by in pull.reviewers)
+    completed_reviewers = pull.approving_reviewers + pull.change_request_reviewers
+    return any(reviewed_by.lower() == reviewer_lower for reviewed_by in completed_reviewers)
 
 
 def progress(message: str, quiet: bool = False) -> None:
