@@ -171,6 +171,7 @@ class PullRequest:
     branch: str
     approvals: int
     approving_reviewers: list[str]
+    change_request_reviewers: list[str]
     reviewers: list[str]
     tickets: list[Ticket] = field(default_factory=list)
 
@@ -405,6 +406,9 @@ def fetch_pull_requests(
         approving_reviewers = sorted(
             reviewer for reviewer, review_state in review_states.items() if review_state == "APPROVED"
         )
+        change_request_reviewers = sorted(
+            reviewer for reviewer, review_state in review_states.items() if review_state == "CHANGES_REQUESTED"
+        )
         reviewers = sorted(review_states)
 
         commits = client.get_paginated(f"/repos/{repo}/pulls/{number}/commits")
@@ -429,6 +433,7 @@ def fetch_pull_requests(
                 branch=branch,
                 approvals=len(approving_reviewers),
                 approving_reviewers=approving_reviewers,
+                change_request_reviewers=change_request_reviewers,
                 reviewers=reviewers,
                 tickets=tickets,
                 min_approvals=min_approvals,
@@ -470,12 +475,16 @@ def render_markdown(
         prs = sorted(grouped[ticket_key], key=lambda pr: (pr.repo, pr.number))
         lines.append(f"## {ticket_key}")
         for pr in prs:
-            marker = "OK" if pr.approvals >= min_approvals else "WAIT"
+            marker = "CHANGES_REQUESTED" if pr.change_request_reviewers else "OK" if pr.approvals >= min_approvals else "WAIT"
             reviewers = ", ".join(pr.approving_reviewers) if pr.approving_reviewers else "none"
+            change_requests = (
+                ", ".join(pr.change_request_reviewers) if pr.change_request_reviewers else "none"
+            )
             reviewed_by = ", ".join(pr.reviewers) if pr.reviewers else "none"
             lines.append(
                 f"- [{marker}] {pr.repo}#{pr.number}: {pr.title} "
-                f"({pr.approvals}/{min_approvals} approvals: {reviewers}; reviewed by: {reviewed_by}) - {pr.url}"
+                f"({pr.approvals}/{min_approvals} approvals: {reviewers}; "
+                f"changes requested by: {change_requests}; reviewed by: {reviewed_by}) - {pr.url}"
             )
         lines.append("")
 
@@ -513,7 +522,9 @@ def render_json(
                         "branch": pr.branch,
                         "approvals": pr.approvals,
                         "has_min_approvals": pr.approvals >= min_approvals,
+                        "has_changes_requested": bool(pr.change_request_reviewers),
                         "approving_reviewers": pr.approving_reviewers,
+                        "change_request_reviewers": pr.change_request_reviewers,
                         "reviewers": pr.reviewers,
                     }
                     for pr in sorted(grouped[ticket_key], key=lambda item: (item.repo, item.number))
@@ -537,8 +548,11 @@ def render_html(
     all_pulls = [pull for pulls in grouped.values() for pull in pulls]
     unique_pulls = {(pull.repo, pull.number): pull for pull in all_pulls}.values()
     total_prs = len(unique_pulls)
-    ready_prs = sum(1 for pull in unique_pulls if pull.approvals >= min_approvals)
-    waiting_prs = total_prs - ready_prs
+    changes_requested_prs = sum(1 for pull in unique_pulls if pull.change_request_reviewers)
+    ready_prs = sum(
+        1 for pull in unique_pulls if pull.approvals >= min_approvals and not pull.change_request_reviewers
+    )
+    waiting_prs = total_prs - ready_prs - changes_requested_prs
     groups_count = len(grouped)
 
     sections = []
@@ -547,9 +561,19 @@ def render_html(
         rows = []
         for pr in prs:
             ready = pr.approvals >= min_approvals
-            status_label = "Ready" if ready else "Waiting"
-            status_class = "ready" if ready else "waiting"
+            if pr.change_request_reviewers:
+                status_label = "Changes Requested"
+                status_class = "changes-requested"
+            elif ready:
+                status_label = "Ready"
+                status_class = "ready"
+            else:
+                status_label = "Waiting"
+                status_class = "waiting"
             reviewers = ", ".join(pr.approving_reviewers) if pr.approving_reviewers else "none"
+            change_requests = (
+                ", ".join(pr.change_request_reviewers) if pr.change_request_reviewers else "none"
+            )
             reviewed_by = ", ".join(pr.reviewers) if pr.reviewers else "none"
             repo_link = html.escape(github_repo_url(pr.repo), quote=True)
             pr_link = html.escape(pr.url, quote=True)
@@ -561,6 +585,7 @@ def render_html(
                 f"<td>{html.escape(pr.title)}</td>"
                 f"<td>{pr.approvals}/{min_approvals}</td>"
                 f"<td>{html.escape(reviewers)}</td>"
+                f"<td>{html.escape(change_requests)}</td>"
                 f"<td>{html.escape(reviewed_by)}</td>"
                 "</tr>"
             )
@@ -570,7 +595,7 @@ def render_html(
             f"<h2>{html.escape(ticket_key)} <span>{len(prs)} PRs</span></h2>"
             "<div class=\"table-wrap\">"
             "<table>"
-            "<thead><tr><th>Status</th><th>Repo</th><th>PR</th><th>Title</th><th>Approvals</th><th>Approvers</th><th>Reviewed By</th></tr></thead>"
+            "<thead><tr><th>Status</th><th>Repo</th><th>PR</th><th>Title</th><th>Approvals</th><th>Approvers</th><th>Changes Requested By</th><th>Reviewed By</th></tr></thead>"
             f"<tbody>{''.join(rows)}</tbody>"
             "</table>"
             "</div>"
@@ -610,6 +635,8 @@ def render_html(
       --ready-text: #166534;
       --waiting-bg: #fef3c7;
       --waiting-text: #92400e;
+      --changes-bg: #fee2e2;
+      --changes-text: #991b1b;
       --error-bg: #fee2e2;
       --error-text: #991b1b;
       --link: #075985;
@@ -726,6 +753,11 @@ def render_html(
       background: var(--waiting-bg);
       color: var(--waiting-text);
     }}
+    .status.changes-requested {{
+      background: var(--changes-bg);
+      color: var(--changes-text);
+      min-width: 142px;
+    }}
     .errors ul {{
       margin: 0;
       padding: 14px 32px 18px;
@@ -747,6 +779,7 @@ def render_html(
       <div><strong>{total_prs}</strong><span>Total PRs</span></div>
       <div><strong>{ready_prs}</strong><span>Ready PRs</span></div>
       <div><strong>{waiting_prs}</strong><span>Waiting PRs</span></div>
+      <div><strong>{changes_requested_prs}</strong><span>Changes Requested</span></div>
       <div><strong>{groups_count}</strong><span>Ticket Groups</span></div>
       <div><strong>{len(errors)}</strong><span>Repo Errors</span></div>
       <div><strong>{min_approvals}</strong><span>Required Approvals</span></div>

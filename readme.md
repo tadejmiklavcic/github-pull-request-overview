@@ -120,7 +120,9 @@ The HTML report includes:
 - clickable pull request links
 - approval count
 - approving reviewer names
+- change-request reviewer names
 - `Ready` or `Waiting` status
+- `Changes Requested` status when a review requested changes
 - repository errors, if any
 
 Progress is printed to stderr, so redirecting the report still works:
