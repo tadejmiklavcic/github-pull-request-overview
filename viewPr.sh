@@ -39,6 +39,7 @@ TICKET_RE = re.compile(
     r"\[(?P<project>DI|CM|VIV|ABMAT|AB|BRIEFD|LK)-(?P<number>\d+)\]\[(?P<type>[FfHhBb])\]"
 )
 TYPE_ORDER = {"H": 0, "B": 1, "F": 2, "?": 3}
+DECISIVE_REVIEW_STATES = {"APPROVED", "CHANGES_REQUESTED", "DISMISSED"}
 DEFAULT_REPOS = [
     "git@github.com:Preskok/account.git",
     "git@github.com:Preskok/address.git",
@@ -172,6 +173,7 @@ class PullRequest:
     approving_reviewers: list[str]
     change_request_reviewers: list[str]
     reviewers: list[str]
+    unresolved_feedback_reviewers: list[str]
     tickets: list[Ticket] = field(default_factory=list)
 
     @property
@@ -214,6 +216,11 @@ class GitHubClient:
             return self._get_with_gh(path, params)
         return self._get_with_token(path, params)
 
+    def graphql(self, query: str, variables: dict[str, Any]) -> Any:
+        if self.use_gh:
+            return self._graphql_with_gh(query, variables)
+        return self._graphql_with_token(query, variables)
+
     def _get_with_gh(self, path: str, params: dict[str, Any] | None = None) -> Any:
         cmd = ["gh", "api", "--method", "GET", path]
         for key, value in (params or {}).items():
@@ -222,6 +229,19 @@ class GitHubClient:
         completed = subprocess.run(cmd, check=False, text=True, capture_output=True)
         if completed.returncode != 0:
             raise RuntimeError(f"gh api failed for {path}: {completed.stderr.strip()}")
+
+        return json.loads(completed.stdout)
+
+    def _graphql_with_gh(self, query: str, variables: dict[str, Any]) -> Any:
+        cmd = ["gh", "api", "graphql", "-f", f"query={query}"]
+        for key, value in variables.items():
+            if value is None:
+                continue
+            cmd.extend(["-F", f"{key}={value}"])
+
+        completed = subprocess.run(cmd, check=False, text=True, capture_output=True)
+        if completed.returncode != 0:
+            raise RuntimeError(f"gh graphql failed: {completed.stderr.strip()}")
 
         return json.loads(completed.stdout)
 
@@ -246,6 +266,24 @@ class GitHubClient:
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
             raise RuntimeError(f"GitHub API failed for {path}: {exc.code} {body}") from exc
+
+    def _graphql_with_token(self, query: str, variables: dict[str, Any]) -> Any:
+        request = urllib.request.Request(
+            "https://api.github.com/graphql",
+            data=json.dumps({"query": query, "variables": variables}).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {self.token}",
+                "Accept": "application/vnd.github+json",
+                "Content-Type": "application/json",
+            },
+        )
+
+        try:
+            with urllib.request.urlopen(request) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"GitHub GraphQL failed: {exc.code} {body}") from exc
 
 
 def parse_args() -> argparse.Namespace:
@@ -385,8 +423,77 @@ def latest_review_states(reviews: list[dict[str, Any]]) -> dict[str, str]:
         login = user.get("login")
         state = review.get("state")
         if login and state:
+            if state == "COMMENTED" and states.get(login) in DECISIVE_REVIEW_STATES:
+                continue
             states[login] = state
     return states
+
+
+def unresolved_feedback_reviewers(
+    client: GitHubClient,
+    repo: str,
+    number: int,
+    reviewer: str | None = None,
+) -> list[str]:
+    owner, name = repo.split("/", 1)
+    query = """
+    query($owner: String!, $name: String!, $number: Int!, $cursor: String) {
+      repository(owner: $owner, name: $name) {
+        pullRequest(number: $number) {
+          reviewThreads(first: 100, after: $cursor) {
+            pageInfo {
+              hasNextPage
+              endCursor
+            }
+            nodes {
+              isResolved
+              comments(first: 100) {
+                nodes {
+                  author {
+                    login
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    """
+    reviewers: set[str] = set()
+    reviewer_lower = reviewer.lower() if reviewer else None
+    cursor: str | None = None
+
+    while True:
+        response = client.graphql(
+            query,
+            {"owner": owner, "name": name, "number": number, "cursor": cursor},
+        )
+        if response.get("errors"):
+            raise RuntimeError(f"GitHub GraphQL errors: {response['errors']}")
+
+        pull_request = (
+            response.get("data", {})
+            .get("repository", {})
+            .get("pullRequest")
+        )
+        if not pull_request:
+            return sorted(reviewers)
+
+        threads = pull_request.get("reviewThreads") or {}
+        for thread in threads.get("nodes") or []:
+            if thread.get("isResolved"):
+                continue
+            comments = (thread.get("comments") or {}).get("nodes") or []
+            for comment in comments:
+                login = ((comment.get("author") or {}).get("login") or "")
+                if login and (not reviewer_lower or login.lower() == reviewer_lower):
+                    reviewers.add(login)
+
+        page_info = threads.get("pageInfo") or {}
+        if not page_info.get("hasNextPage"):
+            return sorted(reviewers)
+        cursor = page_info.get("endCursor")
 
 
 def fetch_pull_requests(
@@ -394,6 +501,7 @@ def fetch_pull_requests(
     repo: str,
     state: str,
     min_approvals: int,
+    feedback_reviewer: str | None = None,
 ) -> list[PullRequest]:
     pulls = client.get_paginated(f"/repos/{repo}/pulls", {"state": state})
     results: list[PullRequest] = []
@@ -409,6 +517,9 @@ def fetch_pull_requests(
             reviewer for reviewer, review_state in review_states.items() if review_state == "CHANGES_REQUESTED"
         )
         reviewers = sorted(review_states)
+        feedback_reviewers = (
+            unresolved_feedback_reviewers(client, repo, number, feedback_reviewer) if feedback_reviewer else []
+        )
 
         commits = client.get_paginated(f"/repos/{repo}/pulls/{number}/commits")
         commit_messages = [
@@ -434,6 +545,7 @@ def fetch_pull_requests(
                 approving_reviewers=approving_reviewers,
                 change_request_reviewers=change_request_reviewers,
                 reviewers=reviewers,
+                unresolved_feedback_reviewers=feedback_reviewers,
                 tickets=tickets,
                 min_approvals=min_approvals,
             )
@@ -474,16 +586,28 @@ def render_markdown(
         prs = sorted(grouped[ticket_key], key=lambda pr: (pr.repo, pr.number))
         lines.append(f"## {ticket_key}")
         for pr in prs:
-            marker = "CHANGES_REQUESTED" if pr.change_request_reviewers else "OK" if pr.approvals >= min_approvals else "WAIT"
+            marker = (
+                "CHANGES_REQUESTED"
+                if pr.change_request_reviewers
+                else "WAITING_FOR_FEEDBACK"
+                if pr.unresolved_feedback_reviewers
+                else "OK"
+                if pr.approvals >= min_approvals
+                else "WAIT"
+            )
             reviewers = ", ".join(pr.approving_reviewers) if pr.approving_reviewers else "none"
             change_requests = (
                 ", ".join(pr.change_request_reviewers) if pr.change_request_reviewers else "none"
+            )
+            waiting_feedback = (
+                ", ".join(pr.unresolved_feedback_reviewers) if pr.unresolved_feedback_reviewers else "none"
             )
             reviewed_by = ", ".join(pr.reviewers) if pr.reviewers else "none"
             lines.append(
                 f"- [{marker}] {pr.repo}#{pr.number}: {pr.title} "
                 f"({pr.approvals}/{min_approvals} approvals: {reviewers}; "
-                f"changes requested by: {change_requests}; reviewed by: {reviewed_by}) - {pr.url}"
+                f"changes requested by: {change_requests}; "
+                f"waiting feedback from: {waiting_feedback}; reviewed by: {reviewed_by}) - {pr.url}"
             )
         lines.append("")
 
@@ -522,8 +646,10 @@ def render_json(
                         "approvals": pr.approvals,
                         "has_min_approvals": pr.approvals >= min_approvals,
                         "has_changes_requested": bool(pr.change_request_reviewers),
+                        "has_unresolved_feedback": bool(pr.unresolved_feedback_reviewers),
                         "approving_reviewers": pr.approving_reviewers,
                         "change_request_reviewers": pr.change_request_reviewers,
+                        "unresolved_feedback_reviewers": pr.unresolved_feedback_reviewers,
                         "reviewers": pr.reviewers,
                     }
                     for pr in sorted(grouped[ticket_key], key=lambda item: (item.repo, item.number))
@@ -548,10 +674,17 @@ def render_html(
     unique_pulls = {(pull.repo, pull.number): pull for pull in all_pulls}.values()
     total_prs = len(unique_pulls)
     changes_requested_prs = sum(1 for pull in unique_pulls if pull.change_request_reviewers)
-    ready_prs = sum(
-        1 for pull in unique_pulls if pull.approvals >= min_approvals and not pull.change_request_reviewers
+    waiting_feedback_prs = sum(
+        1 for pull in unique_pulls if pull.unresolved_feedback_reviewers and not pull.change_request_reviewers
     )
-    waiting_prs = total_prs - ready_prs - changes_requested_prs
+    ready_prs = sum(
+        1
+        for pull in unique_pulls
+        if pull.approvals >= min_approvals
+        and not pull.change_request_reviewers
+        and not pull.unresolved_feedback_reviewers
+    )
+    waiting_prs = total_prs - ready_prs - changes_requested_prs - waiting_feedback_prs
     groups_count = len(grouped)
 
     sections = []
@@ -563,6 +696,9 @@ def render_html(
             if pr.change_request_reviewers:
                 status_label = "Changes Requested"
                 status_class = "changes-requested"
+            elif pr.unresolved_feedback_reviewers:
+                status_label = "Waiting For Feedback"
+                status_class = "waiting-feedback"
             elif ready:
                 status_label = "Ready"
                 status_class = "ready"
@@ -572,6 +708,9 @@ def render_html(
             reviewers = ", ".join(pr.approving_reviewers) if pr.approving_reviewers else "none"
             change_requests = (
                 ", ".join(pr.change_request_reviewers) if pr.change_request_reviewers else "none"
+            )
+            waiting_feedback = (
+                ", ".join(pr.unresolved_feedback_reviewers) if pr.unresolved_feedback_reviewers else "none"
             )
             reviewed_by = ", ".join(pr.reviewers) if pr.reviewers else "none"
             repo_link = html.escape(github_repo_url(pr.repo), quote=True)
@@ -585,6 +724,7 @@ def render_html(
                 f"<td>{pr.approvals}/{min_approvals}</td>"
                 f"<td>{html.escape(reviewers)}</td>"
                 f"<td>{html.escape(change_requests)}</td>"
+                f"<td>{html.escape(waiting_feedback)}</td>"
                 f"<td>{html.escape(reviewed_by)}</td>"
                 "</tr>"
             )
@@ -594,7 +734,7 @@ def render_html(
             f"<h2>{html.escape(ticket_key)} <span>{len(prs)} PRs</span></h2>"
             "<div class=\"table-wrap\">"
             "<table>"
-            "<thead><tr><th>Status</th><th>Repo</th><th>PR</th><th>Title</th><th>Approvals</th><th>Approvers</th><th>Changes Requested By</th><th>Reviewed By</th></tr></thead>"
+            "<thead><tr><th>Status</th><th>Repo</th><th>PR</th><th>Title</th><th>Approvals</th><th>Approvers</th><th>Changes Requested By</th><th>Waiting Feedback From</th><th>Reviewed By</th></tr></thead>"
             f"<tbody>{''.join(rows)}</tbody>"
             "</table>"
             "</div>"
@@ -636,6 +776,8 @@ def render_html(
       --waiting-text: #92400e;
       --changes-bg: #fee2e2;
       --changes-text: #991b1b;
+      --feedback-bg: #dbeafe;
+      --feedback-text: #1e40af;
       --error-bg: #fee2e2;
       --error-text: #991b1b;
       --link: #075985;
@@ -757,6 +899,11 @@ def render_html(
       color: var(--changes-text);
       min-width: 142px;
     }}
+    .status.waiting-feedback {{
+      background: var(--feedback-bg);
+      color: var(--feedback-text);
+      min-width: 160px;
+    }}
     .errors ul {{
       margin: 0;
       padding: 14px 32px 18px;
@@ -779,6 +926,7 @@ def render_html(
       <div><strong>{ready_prs}</strong><span>Ready PRs</span></div>
       <div><strong>{waiting_prs}</strong><span>Waiting PRs</span></div>
       <div><strong>{changes_requested_prs}</strong><span>Changes Requested</span></div>
+      <div><strong>{waiting_feedback_prs}</strong><span>Waiting Feedback</span></div>
       <div><strong>{groups_count}</strong><span>Ticket Groups</span></div>
       <div><strong>{len(errors)}</strong><span>Repo Errors</span></div>
       <div><strong>{min_approvals}</strong><span>Required Approvals</span></div>
@@ -845,7 +993,13 @@ def main() -> int:
         for index, repo in enumerate(repos, start=1):
             progress(f"[{index}/{total_repos}] scanning {repo}...", args.quiet)
             try:
-                repo_pulls = fetch_pull_requests(client, repo, args.state, args.min_approvals)
+                repo_pulls = fetch_pull_requests(
+                    client,
+                    repo,
+                    args.state,
+                    args.min_approvals,
+                    reviewer if args.needs_my_review else None,
+                )
                 pulls.extend(repo_pulls)
                 ready_count = sum(1 for pull in repo_pulls if pull.approvals >= args.min_approvals)
                 progress(

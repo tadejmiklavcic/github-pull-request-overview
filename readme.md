@@ -61,7 +61,7 @@ Show only PRs with at least 2 approvals:
 ./viewPr.sh --only-ready --format html --output pr-report.html
 ```
 
-Show PRs that do not have 2 approvals and where you have not approved or requested changes yet. Plain comments do not hide PRs from this list:
+Show PRs that do not have 2 approvals and where you have not approved or requested changes yet. Plain comments do not hide PRs from this list, and comments after approval do not remove that approval:
 
 ```bash
 ./viewPr.sh --needs-my-review --format html --output my-review-prs.html
@@ -121,8 +121,10 @@ The HTML report includes:
 - approval count
 - approving reviewer names
 - change-request reviewer names
+- unresolved feedback reviewer names
 - `Ready` or `Waiting` status
 - `Changes Requested` status when a review requested changes
+- `Waiting For Feedback` status when your unresolved review-thread comments still need a response
 - repository errors, if any
 
 Progress is printed to stderr, so redirecting the report still works:
