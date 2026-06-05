@@ -61,6 +61,18 @@ Show only PRs with at least 2 approvals:
 ./viewPr.sh --only-ready --format html --output pr-report.html
 ```
 
+Show PRs authored by you that do not have 2 approvals yet:
+
+```bash
+./viewPr.sh --my-prs-pending-approval --format html --output my-pending-prs.html
+```
+
+Use a specific GitHub login instead of the authenticated user:
+
+```bash
+./viewPr.sh --my-prs-pending-approval --author your-github-login --format html --output my-pending-prs.html
+```
+
 Show PRs that do not have 2 approvals and where you have not approved or requested changes yet. Plain comments do not hide PRs from this list, and comments after approval do not remove that approval:
 
 ```bash

@@ -6,6 +6,7 @@ the result by ticket.
 Examples:
   ./viewPr.sh
   ./viewPr.sh --only-ready
+  ./viewPr.sh --my-prs-pending-approval --format html --output my-pending-prs.html
   ./viewPr.sh --format html --output pr-report.html
   ./viewPr.sh base-carmarket/di other-org/other-repo
   ./viewPr.sh --repos-file repos.txt --only-ready
@@ -298,6 +299,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--state", default="open", choices=("open", "closed", "all"), help="PR state to fetch.")
     parser.add_argument("--min-approvals", default=2, type=int, help="Required approval count.")
     parser.add_argument("--only-ready", action="store_true", help="Only show PRs with enough approvals.")
+    parser.add_argument(
+        "--my-prs-pending-approval",
+        action="store_true",
+        help="Only show PRs authored by the author that are below min approvals.",
+    )
+    parser.add_argument(
+        "--author",
+        help="GitHub login to use with --my-prs-pending-approval. Defaults to the authenticated GitHub user.",
+    )
     parser.add_argument(
         "--needs-my-review",
         action="store_true",
@@ -981,6 +991,13 @@ def main() -> int:
         )
         client = GitHubClient(use_gh=not args.no_gh)
         reviewer = args.reviewer
+        author = args.author
+        if args.my_prs_pending_approval and not author:
+            author = get_authenticated_login(client)
+            progress(f"Filtering for PRs authored by {author} and below {args.min_approvals} approvals.", args.quiet)
+        elif args.my_prs_pending_approval:
+            progress(f"Filtering for PRs authored by {author} and below {args.min_approvals} approvals.", args.quiet)
+
         if args.needs_my_review and not reviewer:
             reviewer = get_authenticated_login(client)
             progress(f"Filtering for PRs not yet reviewed by {reviewer}.", args.quiet)
@@ -1014,6 +1031,14 @@ def main() -> int:
 
         if args.only_ready:
             pulls = [pull for pull in pulls if pull.approvals >= args.min_approvals]
+        if args.my_prs_pending_approval:
+            pulls = [
+                pull
+                for pull in pulls
+                if pull.approvals < args.min_approvals
+                and author
+                and pull.author.lower() == author.lower()
+            ]
         if args.needs_my_review:
             pulls = [
                 pull
