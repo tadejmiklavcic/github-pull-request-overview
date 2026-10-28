@@ -1,0 +1,7 @@
+{
+  "name": "github-pull-request-overview",
+  "private": true,
+  "version": "1.0.0",
+  "scripts": { "start": "node server.mjs" },
+  "engines": { "node": ">=18" }
+}
