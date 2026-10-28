@@ -19,5 +19,17 @@ function render(){
 }
 async function poll(){try{const response=await fetch('/api/state');if(!response.ok)throw Error('Cannot read scan status');const state=await response.json();active=state.running;$('run').disabled=active;$('run').textContent=active?'Scanning…':'↻ Scan repositories';$('logs').textContent=state.logs.join('');if(active){$('progress').open=true;$('summary').textContent='Scanning repositories…';}if(state.error)$('error').textContent=state.error;const serialized=JSON.stringify(state.report);if(state.report&&serialized!==previousReport){previousReport=serialized;report=state.report;render();}}catch(error){$('error').textContent=error.message;}finally{setTimeout(poll,1000)}}
  $('scan').onsubmit=async event=>{event.preventDefault();$('error').textContent='';$('run').disabled=true;try{const response=await fetch('/api/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:$('mode').value,login:$('login').value})});const result=await response.json();if(!response.ok)throw Error(result.error);previousReport='';$('progress').open=true;}catch(error){$('error').textContent=error.message;$('run').disabled=false;}};
+ const refreshButton=document.createElement('button');
+ refreshButton.type='button';refreshButton.textContent='Refresh listed repos';refreshButton.disabled=true;
+ $('scan').append(refreshButton);
+ refreshButton.onclick=async()=>{
+   refreshButton.disabled=true;$('run').disabled=true;$('error').textContent='';
+   try{
+     const response=await fetch('/api/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({refreshListed:true})});
+     const result=await response.json();if(!response.ok)throw Error(result.error);
+     active=true;previousReport='';$('progress').open=true;
+   }catch(error){$('error').textContent=error.message;}
+ };
+ setInterval(()=>{refreshButton.disabled=active||!report?.groups.some(group=>group.pull_requests.length);},250);
  $('search').oninput=render;poll();
 </script></body></html>

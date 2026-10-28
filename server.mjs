@@ -6,6 +6,7 @@ const page = await readFile(new URL('./index.html', import.meta.url));
 const script = new URL('./viewPr.sh', import.meta.url);
 let state = { running: false, logs: [], report: null, error: null };
 let child;
+let lastScanOptions = null;
 const modes = { all: [], review: ['--needs-my-review'], mine: ['--my-prs-pending-approval'], ready: ['--only-ready'] };
 
 const server = http.createServer(async (req, res) => {
@@ -27,7 +28,13 @@ const server = http.createServer(async (req, res) => {
         body += chunk;
         if (body.length > 4096) throw new Error('Request too large');
       }
-      const options = JSON.parse(body);
+      let options = JSON.parse(body);
+      let repos = [];
+      if (options.refreshListed === true) {
+        repos = [...new Set((state.report?.groups || []).flatMap(group => group.pull_requests.map(pr => pr.repo)))];
+        if (!lastScanOptions || !repos.length) throw new Error('Run a full scan with matching PRs before refreshing listed repos.');
+        options = { ...lastScanOptions };
+      }
       if (!Object.hasOwn(modes, options.mode)) throw new Error('Invalid mode');
       const args = [script.pathname, '--format', 'json', ...modes[options.mode]];
       if (options.login?.trim()) {
@@ -35,7 +42,9 @@ const server = http.createServer(async (req, res) => {
         if (options.mode === 'review') args.push('--reviewer', options.login.trim());
         if (options.mode === 'mine') args.push('--author', options.login.trim());
       }
-      state = { running: true, logs: [], report: null, error: null };
+      args.push(...repos);
+      lastScanOptions = { mode: options.mode, login: options.login };
+      state = { running: true, logs: repos.length ? [`Refreshing ${repos.length} repositories from the previous results.\n`] : [], report: state.report, error: null };
       let output = '';
       child = spawn('python3', args, { cwd: new URL('.', import.meta.url), env: process.env });
       child.stdout.on('data', chunk => { output += chunk; });
